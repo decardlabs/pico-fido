@@ -31,6 +31,7 @@ if(ESP_PLATFORM)
         src/fido
         pico-keys-sdk/config/esp32/components/pico-keys-sdk
         pico-keys-sdk/config/esp32/components/tinycbor
+        pico-keys-sdk/config/esp32/components/cjson
     )
     if(ENABLE_PQC)
         list(APPEND EXTRA_COMPONENT_DIRS
@@ -112,6 +113,7 @@ list(APPEND SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cbor_cred_mgmt.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cbor_config.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cbor_vendor.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/fido/ota.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cbor_large_blobs.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/management.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/defs.c

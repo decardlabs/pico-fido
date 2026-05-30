@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults.old
+
+# ESP-IDF managed components
+managed_components/
+dependencies.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OTA keys (development only - production keys should never be committed)
+tools/ota_key.pem
+tools/ota_pub.pem
