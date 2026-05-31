@@ -16,7 +16,6 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/ecdsa.h"
 #include "mbedtls/ecp.h"
-#include "mbedtls/pk.h"
 #include "mbedtls/error.h"
 
 static const char *TAG = "pico-fido-ota";

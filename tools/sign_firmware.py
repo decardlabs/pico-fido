@@ -10,19 +10,33 @@ Generates:
     - src/fido/ota_pub_key.h       : Public key header (regenerate when key changes)
 """
 
+import os
 import sys
 import struct
 import hashlib
-from ecdsa import NIST256p, SigningKey
+import re
+from ecdsa import SigningKey
 from ecdsa.util import sigencode_string
-from ecdsa.curves import Curve
 
 OTA_MAGIC = 0x4D524946  # "FIRM" little-endian
-FW_VERSION = 0x0706     # matches PICO_FIDO_VERSION
 
-def sign_firmware(fw_path, output_path, key_path="tools/ota_key.pem"):
+def parse_version(version_h="src/fido/version.h"):
+    """Parse PICO_FIDO_VERSION from version.h to stay in sync with firmware."""
+    with open(version_h) as f:
+        content = f.read()
+    m = re.search(r'#define\s+PICO_FIDO_VERSION\s+(0x[0-9a-fA-F]+|\d+)', content)
+    if not m:
+        print(f"Warning: could not parse version from {version_h}, using default")
+        return 0x0706
+    val = m.group(1)
+    if val.startswith("0x") or val.startswith("0X"):
+        return int(val, 16)
+    return int(val)
+
+def sign_firmware(fw_path, output_path, key_path="tools/ota_key.pem", version_h="src/fido/version.h"):
     with open(fw_path, "rb") as f:
         fw_data = f.read()
+    fw_version = parse_version(version_h)
 
     with open(key_path, "rb") as f:
         key = SigningKey.from_pem(f.read(), hashfunc=hashlib.sha256)
@@ -35,7 +49,7 @@ def sign_firmware(fw_path, output_path, key_path="tools/ota_key.pem"):
 
     # Format: [version:4][magic:4][sha256:32][signature:64][firmware_data...]
     with open(output_path, "wb") as f:
-        f.write(struct.pack("<I", FW_VERSION))
+        f.write(struct.pack("<I", fw_version))
         f.write(struct.pack("<I", OTA_MAGIC))
         f.write(fw_hash)
         f.write(signature)
@@ -45,7 +59,7 @@ def sign_firmware(fw_path, output_path, key_path="tools/ota_key.pem"):
     print(f"Signed firmware: {output_path}")
     print(f"  Firmware size: {len(fw_data)} bytes")
     print(f"  OTA package size: {len(fw_data) + 104} bytes")
-    print(f"  Version: {(FW_VERSION >> 8) & 0xff}.{FW_VERSION & 0xff}")
+    print(f"  Version: {(fw_version >> 8) & 0xff}.{fw_version & 0xff}")
     print(f"  Signature: {signature.hex()[:32]}...")
 
 def generate_pubkey_header(pubkey_path="tools/ota_pub.pem", output="src/fido/ota_pub_key.h"):

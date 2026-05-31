@@ -27,6 +27,12 @@ log = logging.getLogger("ota-flash")
 CTAPHID_VENDOR_FIRST = 0x40
 CTAP_VENDOR_CBOR = CTAPHID_VENDOR_FIRST + 1  # 0x41
 
+from cbor2 import dumps as cbor_dumps, loads as cbor_loads
+
+CTAPHID_VENDOR_FIRST = 0x40
+CTAP_VENDOR_CBOR = CTAPHID_VENDOR_FIRST + 1  # 0x41
+CTAP_VENDOR_OTA = 0x07
+
 # OTA sub-commands
 OTA_CMD_INFO = 0x01
 OTA_CMD_WRITE = 0x02
@@ -56,10 +62,14 @@ def find_device():
 
 
 def send_vendor_cbor(dev, data):
-    """Send a CTAP vendor CBOR command via HID."""
-    # The HID command is CTAP_VENDOR_CBOR (0x41)
-    # data is the raw CBOR payload
-    response = dev.call(CTAP_VENDOR_CBOR, data)
+    """Send a CTAP vendor CBOR command via HID.
+
+    The firmware's cbor_vendor() expects data[0] to be the vendor command
+    type selector (CTAP_VENDOR_OTA = 0x07), routing to the OTA handler.
+    We prepend that byte before the CBOR payload.
+    """
+    frame = bytes([CTAP_VENDOR_OTA]) + data
+    response = dev.call(CTAP_VENDOR_CBOR, frame)
     return response
 
 
@@ -74,15 +84,13 @@ def build_ota_cbor(cmd, payload=None):
         }
     }
     """
-    import cbor2
-
     if payload and len(payload) > 0:
-        return cbor2.dumps({
+        return cbor_dumps({
             0x01: cmd,
             0x02: {0x01: payload}
         })
     else:
-        return cbor2.dumps({
+        return cbor_dumps({
             0x01: cmd,
             0x02: {0x01: b''}
         })
@@ -93,9 +101,8 @@ def ota_info(dev):
     req = build_ota_cbor(OTA_CMD_INFO)
     resp = send_vendor_cbor(dev, req)
     # Parse response
-    import cbor2
     try:
-        decoded = cbor2.loads(resp)
+        decoded = cbor_loads(resp)
         if 0x01 in decoded:
             info = bytes(decoded[0x01])
             if len(info) >= 3:

@@ -10,7 +10,7 @@ body { font-family: -apple-system, system-ui, sans-serif; background: #1a1a2e; c
 .card { background: #16213e; border-radius: 12px; padding: 24px; max-width: 640px; margin: 0 auto; }
 h1 { font-size: 22px; margin-bottom: 20px; text-align: center; color: #e94560; }
 h2 { font-size: 16px; margin: 16px 0 8px; color: #aaa; }
-.status { background: #0f3460; border-radius: 8px; padding: 12px; min-height: 60px; font-size: 13px; line-height: 1.6; margin-bottom: 16px; font-family: monospace; }
+.status { background: #0f3460; border-radius: 8px; padding: 12px; min-height: 80px; font-size: 13px; line-height: 1.6; margin-bottom: 16px; font-family: monospace; overflow-y: auto; max-height: 240px; }
 .status .ok { color: #4ecca3; }
 .status .err { color: #e94560; }
 .status .info { color: #f5a623; }
@@ -24,37 +24,42 @@ button.secondary:hover { background: #1a4a7a; }
 input[type="file"] { display: none; }
 .file-label { display: block; background: #0f3460; border: 2px dashed #555; border-radius: 8px; padding: 16px; text-align: center; cursor: pointer; margin: 8px 0; }
 .file-label:hover { border-color: #e94560; }
-.file-label .fname { color: #4ecca3; font-size: 12px; }
-.hidden { display: none; }
+.file-label .meta { color: #4ecca3; font-size: 12px; margin-top: 4px; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>🔑 Pico FIDO OTA</h1>
-  <div class="status" id="log">等待操作...</div>
-  <button id="btnConnect" onclick="doConnect()">🔗 连接设备</button>
-  <button id="btnInfo" class="secondary" onclick="doInfo()" disabled>ℹ️ 查询设备信息</button>
-  <h2>固件文件</h2>
-  <label class="file-label" id="fileLabel">
-    <div>点击选择 .bin 固件文件</div>
-    <div class="fname" id="fileName"></div>
-  </label>
-  <input type="file" id="fileInput" accept=".bin" onchange="onFileSelect(event)">
-  <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-  <button id="btnFlash" onclick="doFlash()" disabled>🚀 开始 OTA 升级</button>
+<h1>Pico FIDO OTA</h1>
+<div class="status" id="log">等待操作...</div>
+<button id="btnConnect" onclick="doConnect()">连接设备</button>
+<button id="btnInfo" class="secondary" onclick="doInfo()" disabled>查询设备信息</button>
+<h2>固件文件</h2>
+<label class="file-label" id="fileLabel">
+  <div>点击选择 .bin 固件文件</div>
+  <div class="meta" id="fileMeta"></div>
+</label>
+<input type="file" id="fileInput" accept=".bin" onchange="onFileSelect(event)">
+<div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+<button id="btnFlash" onclick="doFlash()" disabled>开始 OTA 升级</button>
 </div>
 <script>
-const CTAPHID_VENDOR_FIRST = 0x40;
-const CTAP_VENDOR_CBOR = CTAPHID_VENDOR_FIRST + 1;
+// Protocol constants
+const CTAPHID_INIT      = 0x86;  // TYPE_INIT (0x80) | CTAPHID_INIT (0x06)
+const CTAP_VENDOR_CBOR  = 0xC1;  // TYPE_INIT (0x80) | (CTAPHID_VENDOR_FIRST + 1)
+const CTAP_VENDOR_OTA   = 0x07;
 
-const OTA_CMD_INFO = 0x01;
+const OTA_CMD_INFO  = 0x01;
 const OTA_CMD_WRITE = 0x02;
-const OTA_CMD_VERIFY = 0x03;
+const OTA_CMD_VERIFY= 0x03;
 const OTA_CMD_ABORT = 0x04;
 
+const OTA_MAGIC     = 0x4D524946; // "FIRM"
+
+// State
 let device = null;
 let cid = null;
 let firmwareData = null;
+let firmwareMeta = '';
 
 const $ = id => document.getElementById(id);
 
@@ -64,47 +69,59 @@ function log(msg, cls = 'info') {
   el.scrollTop = el.scrollHeight;
 }
 
-function encodeCBOR(val) {
+// ─── Minimal CBOR encoder ──────────────────────────────
+function cborEncode(val) {
   const buf = [];
   function enc(v) {
-    if (typeof v === 'number' && Number.isInteger(v) && v >= 0) {
-      if (v < 24) { buf.push(0x00 | v); }
-      else if (v < 0x100) { buf.push(0x18, v); }
-      else if (v < 0x10000) { buf.push(0x19, v >> 8, v & 0xFF); }
-      else { buf.push(0x1a, (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF); }
+    if (typeof v === 'number') {
+      if (Number.isInteger(v) && v >= 0) {
+        if (v < 24)       buf.push(0x00 | v);
+        else if (v < 256) { buf.push(0x18, v); }
+        else if (v < 65536) { buf.push(0x19, v >> 8, v & 0xFF); }
+        else { buf.push(0x1A, (v>>24)&0xFF, (v>>16)&0xFF, (v>>8)&0xFF, v&0xFF); }
+      } else { // negative: not needed for OTA
+        buf.push(0x20);
+      }
     } else if (v instanceof Uint8Array || Array.isArray(v)) {
-      const d = Uint8Array.from(v);
-      if (d.length < 24) { buf.push(0x40 | d.length); }
-      else if (d.length < 0x100) { buf.push(0x58, d.length); }
-      else { buf.push(0x59, d.length >> 8, d.length & 0xFF); }
+      const d = (v instanceof Uint8Array) ? v : new Uint8Array(v);
+      if (d.length < 24)        buf.push(0x40 | d.length);
+      else if (d.length < 256) { buf.push(0x58, d.length); }
+      else                      { buf.push(0x59, d.length >> 8, d.length & 0xFF); }
       buf.push(...d);
     } else if (v instanceof Map) {
       const items = [...v.entries()];
-      buf.push(0xA0 | items.length);
+      const mt = 0xA0 | items.length;
+      buf.push(mt);
       for (const [k, val] of items) { enc(k); enc(val); }
+    } else if (v instanceof Array) {
+      buf.push(0x80 | v.length);
+      for (const item of v) enc(item);
     }
   }
   enc(val);
   return new Uint8Array(buf);
 }
 
-function encodeMapEntry(key, value) {
-  const m = new Map();
-  m.set(key, value);
-  return encodeCBOR(m);
-}
-
-function buildMap(...pairs) {
-  const m = new Map();
-  for (const [k, v] of pairs) m.set(k, v);
-  return encodeCBOR(m);
-}
-
+/** Build the OTA CBOR payload: {0x01: cmd, 0x02: {0x01: payload}} */
 function buildOtaCBOR(cmd, payload) {
-  const inner = encodeMapEntry(0x01, payload || new Uint8Array(0));
-  return buildMap([0x01, cmd], [0x02, inner]);
+  const inner = new Map();
+  inner.set(0x01, payload || new Uint8Array(0));
+  const outer = new Map();
+  outer.set(0x01, cmd);
+  outer.set(0x02, inner);
+  return cborEncode(outer);
 }
 
+/** Build the full frame: [0x07] + OTA_CBOR */
+function buildOtaFrame(cmd, payload) {
+  const cbor = buildOtaCBOR(cmd, payload);
+  const frame = new Uint8Array(1 + cbor.length);
+  frame[0] = CTAP_VENDOR_OTA;
+  frame.set(cbor, 1);
+  return frame;
+}
+
+// ─── WebHID ─────────────────────────────────────────────
 async function doConnect() {
   try {
     const filters = [{ usagePage: 0xF1D0 }];
@@ -112,242 +129,220 @@ async function doConnect() {
     if (!devs.length) { log('未选择设备', 'err'); return; }
     device = devs[0];
     await device.open();
-    log(`已连接: ${device.productName || device.vendorId.toString(16)}`, 'ok');
+    log(`已连接: ${device.productName}`, 'ok');
+    cid = await hidInit();
+    log(`会话 CID: ${cid.toString(16)}`, 'info');
     $('btnConnect').disabled = true;
     $('btnInfo').disabled = false;
     $('btnFlash').disabled = !firmwareData;
-  } catch (e) {
-    log(`连接失败: ${e.message}`, 'err');
-  }
+  } catch (e) { log(`连接失败: ${e.message}`, 'err'); }
 }
 
-async function sendHID(cmd, data) {
-  if (!device) throw new Error('Device not connected');
-  const totalLen = 1 + data.length; // cmd byte + data
-  const payload = new Uint8Array(totalLen);
-  payload[0] = cmd;
-  payload.set(data, 1);
+/** CTAP HID INIT exchange — get a unique channel ID */
+async function hidInit() {
+  const init = new Uint8Array(64);
+  init.set([0xFF,0xFF,0xFF,0xFF, CTAPHID_INIT, 0, 0], 0);
+  init[7] = 0x11; // nonce byte 0
+  init[8] = 0x22; // nonce byte 1
+  init[9] = 0x33; // nonce byte 2
+  init[10]= 0x44; // nonce byte 3
+  init[11]= 0x55; // nonce byte 4
+  init[12]= 0x66; // nonce byte 5
+  init[13]= 0x77; // nonce byte 6
+  init[14]= 0x88; // nonce byte 7
 
-  // Use broadcast CID to discover
-  const myCid = 0xFFFFFFFF;
-  const initPkt = new Uint8Array(64);
-  initPkt[0] = (myCid >> 24) & 0xFF;
-  initPkt[1] = (myCid >> 16) & 0xFF;
-  initPkt[2] = (myCid >> 8) & 0xFF;
-  initPkt[3] = myCid & 0xFF;
-  initPkt[4] = 0x43; // CTAPHID_INIT
-  initPkt[5] = 0;
-  initPkt[6] = 0; // BCNT = 0
+  await device.sendReport(0, init);
+  const resp = await readReport();
+  // CID is bytes 0-3 of response
+  return (resp[0]<<24)|(resp[1]<<16)|(resp[2]<<8)|resp[3];
+}
 
-  // First send INIT to get CID
-  await device.sendReport(0, initPkt);
-  const initResp = await readReport();
-  const newCid = (initResp[0] << 24) | (initResp[1] << 16) | (initResp[2] << 8) | initResp[3];
-  cid = newCid;
+function readReport() {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('读取超时')), 15000);
+    device.addEventListener('inputreport', function handler(e) {
+      clearTimeout(timeout);
+      device.removeEventListener('inputreport', handler);
+      resolve(new Uint8Array(e.data.buffer));
+    }, { once: true });
+  });
+}
 
-  // Now send actual command
-  const bcnt = totalLen;
-  const pktCount = Math.ceil((bcnt + 7) / 59);
-  const seqs = [];
+/** Send data via CTAP HID vendor command */
+async function hidSend(cmd, payload) {
+  if (!device || !cid) throw new Error('未连接');
+  const totalLen = payload.length;
+  const initCap = 57;
+  const contCap = 59;
 
-  // Init packet
   const pkt0 = new Uint8Array(64);
   pkt0[0] = (cid >> 24) & 0xFF;
   pkt0[1] = (cid >> 16) & 0xFF;
   pkt0[2] = (cid >> 8) & 0xFF;
   pkt0[3] = cid & 0xFF;
-  pkt0[4] = 0x41; // CTAP_VENDOR_CBOR
-  pkt0[5] = (bcnt >> 8) & 0xFF;
-  pkt0[6] = bcnt & 0xFF;
-  const initDataLen = Math.min(bcnt, 57);
-  pkt0.set(payload.subarray(0, initDataLen), 7);
+  pkt0[4] = cmd;
+  pkt0[5] = (totalLen >> 8) & 0xFF;
+  pkt0[6] = totalLen & 0xFF;
+  const n0 = Math.min(totalLen, initCap);
+  pkt0.set(payload.subarray(0, n0), 7);
   await device.sendReport(0, pkt0);
 
-  let offset = initDataLen;
-  let seq = 0;
-  while (offset < bcnt) {
-    const cont = new Uint8Array(64);
-    cont[0] = (cid >> 24) & 0xFF;
-    cont[1] = (cid >> 16) & 0xFF;
-    cont[2] = (cid >> 8) & 0xFF;
-    cont[3] = cid & 0xFF;
-    cont[4] = seq;
-    const contLen = Math.min(bcnt - offset, 59);
-    cont.set(payload.subarray(offset, offset + contLen), 5);
-    await device.sendReport(0, cont);
-    offset += contLen;
+  let off = n0, seq = 0;
+  while (off < totalLen) {
+    const pkt = new Uint8Array(64);
+    pkt[0] = (cid >> 24) & 0xFF;
+    pkt[1] = (cid >> 16) & 0xFF;
+    pkt[2] = (cid >> 8) & 0xFF;
+    pkt[3] = cid & 0xFF;
+    pkt[4] = seq & 0x7F;
+    const n = Math.min(totalLen - off, contCap);
+    pkt.set(payload.subarray(off, off + n), 5);
+    await device.sendReport(0, pkt);
+    off += n;
     seq++;
   }
 }
 
-function readReport() {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('HID read timeout')), 10000);
-    device.addEventListener('inputreport', function handler(e) {
-      clearTimeout(timeout);
-      device.removeEventListener('inputreport', handler);
-      resolve(new Uint8Array(e.data.buffer));
-    });
-  });
-}
-
-async function recvResponse() {
-  // Read init packet
+/** Receive response via CTAP HID */
+async function hidRecv() {
   const init = await readReport();
-  const cmd = init[4];
   const rlen = (init[5] << 8) | init[6];
-  let data = new Uint8Array(init.subarray(7, 7 + Math.min(rlen, 57)));
-
-  let remaining = rlen - 57;
-  let seq = 0;
-  while (remaining > 0) {
-    const cont = await readReport();
-    const contLen = Math.min(remaining, 59);
-    const tmp = new Uint8Array(data.length + contLen);
+  let data = init.slice(7, 7 + Math.min(rlen, 57));
+  let remain = rlen - 57, seq = 0;
+  while (remain > 0) {
+    const pkt = await readReport();
+    const n = Math.min(remain, 59);
+    const tmp = new Uint8Array(data.length + n);
     tmp.set(data);
-    tmp.set(cont.subarray(5, 5 + contLen), data.length);
+    tmp.set(pkt.subarray(5, 5 + n), data.length);
     data = tmp;
-    remaining -= contLen;
+    remain -= n;
     seq++;
   }
   return data;
 }
 
+// ─── Device queries ────────────────────────────────────
 async function doInfo() {
   $('btnInfo').disabled = true;
   try {
-    const req = buildOtaCBOR(OTA_CMD_INFO);
-    await sendHID(0x41, req);
-    const resp = await recvResponse();
-    log(`收到响应 ${resp.length} 字节`, 'ok');
-    log(`原始: ${Array.from(resp.subarray(0, 20)).map(b => b.toString(16).padStart(2,'0')).join(' ')}`, 'info');
+    const frame = buildOtaFrame(OTA_CMD_INFO);
+    await hidSend(CTAP_VENDOR_CBOR, frame);
+    const resp = await hidRecv();
+    log(`收到 ${resp.length} 字节`, 'ok');
 
-    // Try to parse CBOR response
-    const info = decodeSimpleCBOR(resp);
+    // Parse CBOR response: {0x01: h'info', 0x02: status}
+    const info = parseInfoResp(resp);
     if (info) {
-      log(`版本: ${info.major}.${info.minor}`, 'ok');
-      log(`状态: ${['空闲','忙','错误','完成'][info.status] || info.status}`, 'ok');
+      const states = ['空闲','忙','错误','完成'];
+      log(`版本: ${info.major}.${info.minor}  状态: ${states[info.status]||info.status}`, 'ok');
       if (info.err) log(`错误码: ${info.err}`, 'err');
+    } else {
+      log('无法解析响应', 'err');
     }
-  } catch (e) {
-    log(`查询失败: ${e.message}`, 'err');
-  }
+  } catch (e) { log(`查询失败: ${e.message}`, 'err'); }
   $('btnInfo').disabled = false;
 }
 
-function decodeSimpleCBOR(data) {
+function parseInfoResp(data) {
   try {
-    // Parse CBOR map response
-    const result = {};
-    // CBOR map start at byte 0
     let off = 0;
     if ((data[off] & 0xE0) !== 0xA0) return null;
-    const mapLen = data[off] & 0x1F;
-    off++;
-    for (let i = 0; i < mapLen && off < data.length; i++) {
+    const n = data[off] & 0x0F; off++;
+    let result = {};
+    for (let i = 0; i < n && off < data.length; i++) {
       const key = data[off]; off++;
-      if ((data[off] & 0x40) === 0x40) {
-        // byte string
-        let slen = data[off] & 0x1F; off++;
-        const str = data.slice(off, off + slen); off += slen;
+      if ((data[off] & 0xE0) === 0x40) {
+        const sl = data[off] & 0x1F; off++;
+        const str = data.slice(off, off + sl); off += sl;
         if (key === 0x01 && str.length >= 3) {
-          result.status = str[0];
-          result.major = str[1];
-          result.minor = str[2];
+          result = { status: str[0], major: str[1], minor: str[2], err: str.length > 3 ? str[3] : 0 };
         }
       } else if (key === 0x02) {
-        result.success = data[off] === 0; off++;
+        result.success = data[off]; off++;
       }
     }
-    return Object.keys(result).length ? result : null;
-  } catch (e) {
-    return null;
-  }
+    return result;
+  } catch(e) { return null; }
 }
 
+// ─── File handling ─────────────────────────────────────
 function onFileSelect(e) {
   const file = e.target.files[0];
   if (!file) return;
-  $('fileName').textContent = `${file.name} (${file.size} 字节)`;
+  $('fileMeta').textContent = `${file.name} (${file.size} 字节)`;
 
   const reader = new FileReader();
   reader.onload = function(ev) {
-    firmwareData = new Uint8Array(ev.target.result);
-    if (firmwareData.length < 104) {
-      log(`固件文件过小: ${firmwareData.length} 字节`, 'err');
-      firmwareData = null;
-      $('btnFlash').disabled = true;
-      return;
-    }
-    const magic = (firmwareData[4] | (firmwareData[5] << 8) | (firmwareData[6] << 16) | (firmwareData[7] << 24)) >>> 0;
-    const ver = (firmwareData[0] | (firmwareData[1] << 8)) >>> 0;
-    const bodyLen = firmwareData.length - 104;
-    if (magic === 0x4D524946) {
-      log(`固件版本: ${(ver >> 8) & 0xFF}.${ver & 0xFF}, 数据: ${bodyLen} 字节`, 'ok');
-      $('btnFlash').disabled = !device;
-    } else {
-      log('无效的 OTA 固件文件 (magic 错误)', 'err');
-      firmwareData = null;
-      $('btnFlash').disabled = true;
-    }
+    const raw = new Uint8Array(ev.target.result);
+    if (raw.length < 104) { log(`文件过小: ${raw.length} 字节`, 'err'); return; }
+
+    const magic = (raw[4] | (raw[5]<<8) | (raw[6]<<16) | (raw[7]<<24)) >>> 0;
+    const ver   = (raw[0] | (raw[1]<<8) | (raw[2]<<16) | (raw[3]<<24)) >>> 0;
+    const body  = raw.length - 104;
+
+    if (magic !== OTA_MAGIC) { log('无效的 OTA 固件 (magic 错误)', 'err'); return; }
+
+    firmwareData = raw;
+    const verStr = `${(ver >> 8) & 0xFF}.${ver & 0xFF}`;
+    firmwareMeta = `版本 ${verStr}, 固件 ${body} 字节`;
+    $('fileMeta').textContent += ` — 版本 ${verStr}, 固件 ${body} 字节`;
+    log(`已加载: 版本 ${verStr}, 固体数据 ${body} 字节`, 'ok');
+    $('btnFlash').disabled = !device;
   };
   reader.readAsArrayBuffer(file);
 }
 
+// ─── OTA flash ─────────────────────────────────────────
 async function doFlash() {
   if (!device || !firmwareData) return;
 
-  const version = (firmwareData[0] | (firmwareData[1] << 8) | (firmwareData[2] << 16) | (firmwareData[3] << 24)) >>> 0;
-  const fwBody = firmwareData.slice(104);
-  const total = fwBody.length;
-  const meta = firmwareData.slice(0, 104);
+  const version  = (firmwareData[0]|(firmwareData[1]<<8)|(firmwareData[2]<<16)|(firmwareData[3]<<24))>>>0;
+  const meta     = firmwareData.slice(0, 104);
+  const fwBody   = firmwareData.slice(104);
+  const total    = fwBody.length;
 
   $('btnFlash').disabled = true;
   $('progressBar').style.width = '0%';
-  log(`开始 OTA 升级，总计 ${total} 字节...`, 'info');
+  log(`开始 OTA 升级，${total} 字节...`, 'info');
 
   try {
-    // Abort any existing OTA
-    await sendHID(0x41, buildOtaCBOR(OTA_CMD_ABORT));
-    await new Promise(r => setTimeout(r, 100));
+    // Abort any in-progress OTA
+    await hidSend(CTAP_VENDOR_CBOR, buildOtaFrame(OTA_CMD_ABORT));
+    await hidRecv();
+    await sleep(100);
 
-    const CHUNK_SIZE = 768;
+    const CHUNK = 768;
     let sent = 0;
 
-    for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
-      const chunk = fwBody.slice(offset, offset + CHUNK_SIZE);
-      const req = buildOtaCBOR(OTA_CMD_WRITE, chunk);
-      await sendHID(0x41, req);
-      const resp = await recvResponse();
+    for (let off = 0; off < total; off += CHUNK) {
+      const chunk = fwBody.slice(off, off + CHUNK);
+      await hidSend(CTAP_VENDOR_CBOR, buildOtaFrame(OTA_CMD_WRITE, chunk));
+      await hidRecv(); // consume response
       sent += chunk.length;
       const pct = Math.round(sent * 100 / total);
       $('progressBar').style.width = pct + '%';
-
-      if (sent % (CHUNK_SIZE * 50) < CHUNK_SIZE) {
-        log(`进度: ${pct}% (${sent}/${total})`, 'ok');
-      }
+      if (sent % (CHUNK * 60) < CHUNK) log(`进度: ${pct}% (${sent}/${total})`, 'ok');
     }
 
-    log(`固件传输完成! 正在验证签名...`, 'info');
+    log('传输完成，验证签名...', 'info');
     $('progressBar').style.width = '100%';
 
-    // Send verify
-    const verifyReq = buildOtaCBOR(OTA_CMD_VERIFY, meta);
-    await sendHID(0x41, verifyReq);
-    log('✓ OTA 升级完成! 设备正在重启...', 'ok');
+    // Verify & activate (device will restart on success)
+    await hidSend(CTAP_VENDOR_CBOR, buildOtaFrame(OTA_CMD_VERIFY, meta));
+    log('OTA 完成！设备正在重启...', 'ok');
 
-    await new Promise(r => setTimeout(r, 3000));
+    await sleep(3000);
     try { device.close(); } catch(e) {}
-    log(`设备已重启。`);
-    log(`如需重新连接，请点击"连接设备"按钮。`, 'info');
+    log('设备已重启，可重新连接。');
   } catch (e) {
     log(`OTA 失败: ${e.message}`, 'err');
-    $('btnFlash').disabled = false;
     $('progressBar').style.width = '0%';
+    $('btnFlash').disabled = false;
   }
 }
 
-log('点击"连接设备"开始。', 'info');
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 </script>
 </body>
 </html>
